@@ -366,7 +366,7 @@ func (s *server) handleTapConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.confirmPage(w, nonce, tok, verb)
+	s.autoSubmitPage(w, nonce, tok, verb)
 }
 
 func (s *server) handleTap(w http.ResponseWriter, r *http.Request) {
@@ -458,8 +458,17 @@ func decisionBody(d decision, nonce string) string {
 	return string(d) + " " + nonce
 }
 
-// confirmPage renders a single button that POSTs the decision.
-func (s *server) confirmPage(w http.ResponseWriter, nonce, token, verb string) {
+// autoSubmitPage turns the browser's GET into the POST that actually
+// decides, without asking the user anything - they already decided when
+// they tapped the notification.
+//
+// The indirection exists only because a tap opens a URL as a GET, and a GET
+// must not have side effects: a link preview, scanner, prefetch or
+// automatic retry would otherwise approve a production credential request
+// on the user's behalf. Those clients fetch HTML but do not run scripts, so
+// submitting from JS is what separates a real tap from a machine touching
+// the URL. The noscript fallback keeps it usable if scripting is off.
+func (s *server) autoSubmitPage(w http.ResponseWriter, nonce, token, verb string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	action := fmt.Sprintf("/d/%s/%s/%s", url.PathEscape(nonce), url.PathEscape(token), url.PathEscape(verb))
@@ -468,15 +477,16 @@ func (s *server) confirmPage(w http.ResponseWriter, nonce, token, verb string) {
 		label = "Deny"
 	}
 	fmt.Fprintf(w, `<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Confirm %s</title><style>body{font-family:-apple-system,system-ui,sans-serif;margin:0;
+<title>%s</title><style>body{font-family:-apple-system,system-ui,sans-serif;margin:0;
 display:flex;min-height:100vh;align-items:center;justify-content:center;background:#111;color:#eee}
-form{max-width:28rem;padding:2rem;text-align:center}h1{font-size:1.5rem;margin:0 0 1.5rem}
-button{font-size:1.1rem;padding:.9rem 2.5rem;border:0;border-radius:.5rem;background:#2563eb;
-color:#fff;cursor:pointer}button.deny{background:#b91c1c}</style>
-<form method="POST" action="%s"><h1>%s this request?</h1>
-<button class="%s" type="submit">%s</button></form>`,
-		html.EscapeString(label), html.EscapeString(action), html.EscapeString(label),
-		html.EscapeString(verb), html.EscapeString(label))
+div{max-width:28rem;padding:2rem;text-align:center}p{margin:0;color:#aaa}
+button{font-size:1.1rem;padding:.9rem 2.5rem;border:0;border-radius:.5rem;background:#2563eb;color:#fff}</style>
+<div><p>Sending%s</p>
+<form id="f" method="POST" action="%s">
+<noscript><button type="submit">%s</button></noscript></form></div>
+<script>document.getElementById('f').submit()</script>`,
+		html.EscapeString(label), html.EscapeString("\u2026"),
+		html.EscapeString(action), html.EscapeString(label))
 }
 
 func (s *server) page(w http.ResponseWriter, code int, title, msg string) {
