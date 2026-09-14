@@ -1,0 +1,95 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - csm-dev
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    environment: github-actions
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Extract repository name
+        id: extract-repo-name
+        uses: actions/github-script@v4
+        with:
+          script: |
+            const repoName = process.env.GITHUB_REPOSITORY.split('/')[1];
+            core.setOutput('repo', repoName);
+
+      # Login against a Docker registry except on PR
+      # https://github.com/docker/login-action
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build Go binary
+      - name: Build Go binary
+        run: |
+          export CGO_ENABLED=0
+          go build -o bin/app
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      # Build and push Docker image with Buildx (don't push on PR)
+      # https://github.com/docker/build-push-action
+      - name: Build and push Docker image
+        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ env.REGISTRY }}/christopherscot/${{ steps.extract-repo-name.outputs.repo }}:latest
+            ${{ env.REGISTRY }}/christopherscot/${{ steps.extract-repo-name.outputs.repo }}:${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # if branch is main, deploy to argo
+      - name: Argo Publish
+        if: github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.CI_PAT }}
+        run: |
+          git clone https://x-access-token:${GITHUB_TOKEN}@github.com/ChristopherScot/homelab.git
+          cd homelab
+          latest_release_url=$(curl -s https://api.github.com/repos/ChristopherScot/ci-scripts/releases/latest | jq -r '.assets[] | select(.name == "argo-update.tar.gz") | .browser_download_url')
+          curl -L -o argo-update.tar.gz $latest_release_url
+          tar -xzvf argo-update.tar.gz
+          chmod +x argo-update
+          ./argo-update ../config.yaml ghcr.io/christopherscot/${{ steps.extract-repo-name.outputs.repo }}:${{ github.sha }} 
+          rm -rf argo-update argo-update.tar.gz
+          git config --global user.email "CI@ChrisScotMartin.com"
+          git config --global user.name "CI"
+          git add .
+          git commit -m "CI Action from repo: ${{ steps.extract-repo-name.outputs.repo }}, commit: ${{ github.sha }}"
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/ChristopherScot/homelab.git
+
+      # - name: SSH DEBUG
+      #   if: failure()
+      #   uses: mxschmitt/action-tmate@v3
+      #   with:
+      #     limit-access-to-actor: true

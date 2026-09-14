@@ -1,0 +1,9 @@
+name: approvald
+team: me-myself-and-i
+replicas: 1
+type: go-service
+ingress:
+  type: ClusterIP
+  ports:
+  - port: 3000
+config: {}
