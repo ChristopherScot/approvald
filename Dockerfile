@@ -1,14 +1,14 @@
-# Use a minimal base image to run the application
+# The template's Dockerfile copies into /root/ and runs as root. This
+# service runs with runAsNonRoot/runAsUser 65532 and a read-only root
+# filesystem, so the binary has to live somewhere that user can execute.
 FROM alpine:latest
 
-# Set the working directory inside the container
-WORKDIR /root/
+RUN addgroup -g 65532 -S nonroot && adduser -u 65532 -S nonroot -G nonroot
 
-# Copy the pre-built application into the container
-COPY bin/app .
+WORKDIR /app
+COPY bin/app /app/app
+RUN chmod 0555 /app/app
 
-# Expose the port the application runs on
+USER 65532:65532
 EXPOSE 3000
-
-# Define the entry point to run the application
-CMD ["./app"]
+ENTRYPOINT ["/app/app"]
