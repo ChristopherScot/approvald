@@ -68,28 +68,9 @@ jobs:
             ${{ env.REGISTRY }}/christopherscot/${{ steps.extract-repo-name.outputs.repo }}:${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # if branch is main, deploy to argo
-      - name: Argo Publish
-        if: github.ref == 'refs/heads/main'
-        env:
-          GITHUB_TOKEN: ${{ secrets.CI_PAT }}
-        run: |
-          git clone https://x-access-token:${GITHUB_TOKEN}@github.com/ChristopherScot/homelab.git
-          cd homelab
-          latest_release_url=$(curl -s https://api.github.com/repos/ChristopherScot/ci-scripts/releases/latest | jq -r '.assets[] | select(.name == "argo-update.tar.gz") | .browser_download_url')
-          curl -L -o argo-update.tar.gz $latest_release_url
-          tar -xzvf argo-update.tar.gz
-          chmod +x argo-update
-          ./argo-update ../config.yaml ghcr.io/christopherscot/${{ steps.extract-repo-name.outputs.repo }}:${{ github.sha }} 
-          rm -rf argo-update argo-update.tar.gz
-          git config --global user.email "CI@ChrisScotMartin.com"
-          git config --global user.name "CI"
-          git add .
-          git commit -m "CI Action from repo: ${{ steps.extract-repo-name.outputs.repo }}, commit: ${{ github.sha }}"
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/ChristopherScot/homelab.git
-
-      # - name: SSH DEBUG
-      #   if: failure()
-      #   uses: mxschmitt/action-tmate@v3
-      #   with:
-      #     limit-access-to-actor: true
+      # NOTE: the template's "Argo Publish" step is deliberately removed.
+      # It runs argo-update against config.yaml, which GENERATES a
+      # deployment/service into the homelab repo and would overwrite the
+      # hand-written manifests there - the ExternalSecret, securityContext,
+      # probes and public ingress this service needs. The homelab repo owns
+      # approvald/ and tracks the image by tag; nothing here writes to it.
