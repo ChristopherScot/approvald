@@ -432,6 +432,14 @@ func routeLogger(next http.Handler) http.Handler {
 	})
 }
 
+// envOr returns the environment value for k, or def when unset.
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
 func mustEnv(k string) string {
 	v := os.Getenv(k)
 	if v == "" {
@@ -469,15 +477,16 @@ func main() {
 		fmt.Fprintln(w, "ok")
 	})
 
+	addr := "0.0.0.0:" + envOr("PORT", "3000")
 	srv := &http.Server{
-		Addr:              "0.0.0.0:3000",
+		Addr:              addr,
 		Handler:           r,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	slog.Info("approvald started", "addr", ":3000")
+	slog.Info("approvald started", "addr", addr)
 	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
