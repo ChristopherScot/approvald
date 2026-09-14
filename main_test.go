@@ -170,3 +170,30 @@ func TestDecisionBody(t *testing.T) {
 		t.Errorf("decisionBody() = %q, want %q", got, want)
 	}
 }
+
+// A GET must never decide. A link preview, scanner, or speculative prefetch
+// touching the tap URL would otherwise approve a production credential
+// request on the user's behalf.
+func TestGetDoesNotDecide(t *testing.T) {
+	st := newPending(t, "n1", "tok", 0)
+
+	// Simulate what the GET handler is allowed to do: peek only.
+	if _, err := st.peek("n1", "tok"); err != nil {
+		t.Fatalf("peek() error = %v, want nil", err)
+	}
+	// The request must still be undecided and still publishable.
+	res, err := st.decide("n1", "tok", decisionApprove)
+	if err != nil {
+		t.Fatalf("decide() after peek error = %v, want nil", err)
+	}
+	if !res.publish {
+		t.Error("peek consumed the decision: publish = false, want true")
+	}
+}
+
+func TestPeekRejectsBadToken(t *testing.T) {
+	st := newPending(t, "n1", "right", 0)
+	if _, err := st.peek("n1", "wrong"); err != errUnknown {
+		t.Errorf("peek(wrong token) error = %v, want errUnknown", err)
+	}
+}

@@ -32,7 +32,8 @@ which is why this is not a login session.
 | Route | Auth | Purpose |
 |---|---|---|
 | `POST /register` | `Authorization: Bearer $REGISTER_TOKEN` | Register a nonce, mint tap URLs |
-| `GET /d/{nonce}/{token}/{verb}` | the token in the path | Record + publish a decision |
+| `GET /d/{nonce}/{token}/{verb}` | the token in the path | Render a confirmation button (decides nothing) |
+| `POST /d/{nonce}/{token}/{verb}` | the token in the path | Record + publish the decision |
 | `GET /healthz` | none | Liveness |
 
 `verb` is `approve` or `deny`.
@@ -57,8 +58,12 @@ All required:
   nothing.
 - Undecided requests expire after 10 minutes; decided ones are retained 30
   minutes so replays are rejected rather than re-published.
-- Decision pages are `Cache-Control: no-store` so a prefetching client
-  cannot approve on someone's behalf.
+- A GET never decides. The tap link is opened by a browser navigation,
+  which is a GET, so the link is hit by anything that previews, scans, or
+  speculatively prefetches it - each of which would otherwise approve a
+  production credential request. GET renders a button; the POST it submits
+  makes the decision. `Cache-Control: no-store` is set too, but it does not
+  help here: the request still reaches the server.
 - A decision whose publish failed stays retriable: tapping again retries
   rather than reporting "already decided". The decision itself never
   changes once set.

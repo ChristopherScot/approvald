@@ -164,6 +164,25 @@ func (s *store) releasePublish(nonce string) {
 	}
 }
 
+// peek reports a request's state without deciding it, for rendering the
+// confirmation page. Verifies the token so an invalid link is rejected
+// before the user taps anything.
+func (s *store) peek(nonce, token string) (request, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.m[nonce]
+	if !ok {
+		return request{}, errUnknown
+	}
+	if subtle.ConstantTimeCompare([]byte(r.token), []byte(token)) != 1 {
+		return request{}, errUnknown
+	}
+	if r.decided == decisionNone && !r.decidable(time.Now()) {
+		return request{}, errExpired
+	}
+	return *r, nil
+}
+
 // detailFor returns the registered detail string for a decided request.
 func (s *store) detailFor(nonce string) string {
 	s.mu.Lock()
@@ -315,6 +334,41 @@ func isSafeNonce(s string) bool {
 }
 
 // decide handles the tap. Path: /d/<nonce>/<token>/<approve|deny>
+// handleTapConfirm renders a confirmation button. The tap link is opened by
+// a browser navigation, which is a GET, and a GET must not change anything:
+// a link preview, scanner, or speculative prefetch touching the URL would
+// otherwise approve a production credential request on the user's behalf.
+// Cache-Control alone does not prevent that - the request still arrives.
+// So the decision is made by the POST this page submits.
+func (s *server) handleTapConfirm(w http.ResponseWriter, r *http.Request) {
+	nonce := chi.URLParam(r, "nonce")
+	tok := chi.URLParam(r, "token")
+	verb := chi.URLParam(r, "verb")
+
+	if verb != "approve" && verb != "deny" {
+		s.page(w, http.StatusBadRequest, "Bad request", "Unknown action.")
+		return
+	}
+
+	// Peek without deciding, so an expired or unknown link says so here
+	// rather than after a pointless tap.
+	if st, err := s.store.peek(nonce, tok); err != nil {
+		var ue *userError
+		if errors.As(err, &ue) {
+			s.page(w, ue.code, ue.title, ue.msg)
+			return
+		}
+		s.page(w, http.StatusInternalServerError, "Error", "Something went wrong.")
+		return
+	} else if st.decided != decisionNone {
+		s.page(w, http.StatusOK, "Already decided",
+			fmt.Sprintf("This request was already %sd.", st.decided))
+		return
+	}
+
+	s.confirmPage(w, nonce, tok, verb)
+}
+
 func (s *server) handleTap(w http.ResponseWriter, r *http.Request) {
 	nonce := chi.URLParam(r, "nonce")
 	tok := chi.URLParam(r, "token")
@@ -404,6 +458,27 @@ func decisionBody(d decision, nonce string) string {
 	return string(d) + " " + nonce
 }
 
+// confirmPage renders a single button that POSTs the decision.
+func (s *server) confirmPage(w http.ResponseWriter, nonce, token, verb string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	action := fmt.Sprintf("/d/%s/%s/%s", url.PathEscape(nonce), url.PathEscape(token), url.PathEscape(verb))
+	label := "Approve"
+	if verb == "deny" {
+		label = "Deny"
+	}
+	fmt.Fprintf(w, `<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Confirm %s</title><style>body{font-family:-apple-system,system-ui,sans-serif;margin:0;
+display:flex;min-height:100vh;align-items:center;justify-content:center;background:#111;color:#eee}
+form{max-width:28rem;padding:2rem;text-align:center}h1{font-size:1.5rem;margin:0 0 1.5rem}
+button{font-size:1.1rem;padding:.9rem 2.5rem;border:0;border-radius:.5rem;background:#2563eb;
+color:#fff;cursor:pointer}button.deny{background:#b91c1c}</style>
+<form method="POST" action="%s"><h1>%s this request?</h1>
+<button class="%s" type="submit">%s</button></form>`,
+		html.EscapeString(label), html.EscapeString(action), html.EscapeString(label),
+		html.EscapeString(verb), html.EscapeString(label))
+}
+
 func (s *server) page(w http.ResponseWriter, code int, title, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// A prefetching client must not be able to approve on the user's behalf.
@@ -472,7 +547,8 @@ func main() {
 	r.Use(routeLogger)
 	r.Use(middleware.Recoverer)
 	r.Post("/register", s.handleRegister)
-	r.Get("/d/{nonce}/{token}/{verb}", s.handleTap)
+	r.Get("/d/{nonce}/{token}/{verb}", s.handleTapConfirm)
+	r.Post("/d/{nonce}/{token}/{verb}", s.handleTap)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
