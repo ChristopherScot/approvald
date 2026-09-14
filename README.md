@@ -59,3 +59,34 @@ All required:
   minutes so replays are rejected rather than re-published.
 - Decision pages are `Cache-Control: no-store` so a prefetching client
   cannot approve on someone's behalf.
+- A decision whose publish failed stays retriable: tapping again retries
+  rather than reporting "already decided". The decision itself never
+  changes once set.
+- Request logging deliberately records the matched route pattern, never the
+  raw URI - the URI contains a live capability token.
+- Unknown nonces and bad tokens return an identical response, so a public
+  caller cannot use it to enumerate which nonces exist.
+
+## Operational constraints
+
+**Single replica, in-memory state.** Pending approvals live in process
+memory, so two replicas would each see only their own and roughly half of
+all taps would 404. The Deployment pins `replicas: 1` with
+`strategy: Recreate`; do not scale it.
+
+**A restart drops pending approvals.** They fail closed - the Mac times
+out and denies, and the command is re-run. This is deliberate: persistence
+would add a database dependency to a service whose job is gating database
+credentials, and the cost of the failure is one re-run.
+
+## Contract with the caller
+
+The Mac side depends on all of these:
+
+| | |
+|---|---|
+| Wire format | `approve <nonce>` / `deny <nonce>`, published to the response topic |
+| Nonce charset | `A-Za-z0-9`, `-`, `_` |
+| Nonce max length | 128 bytes |
+| `detail` max length | 256 bytes, control characters stripped |
+| Request TTL | 10 minutes, also returned as `expires_in_seconds` |

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -41,6 +42,9 @@ const (
 	retainAfterDecision = 30 * time.Minute
 
 	maxNonceLen = 128
+
+	// Bounded and stripped before it reaches an ntfy header.
+	maxDetailLen = 256
 )
 
 type decision string
@@ -57,10 +61,22 @@ type request struct {
 	createdAt time.Time
 	decided   decision
 	decidedAt time.Time
-	detail    string
+	// publishing marks an in-flight publish attempt so concurrent taps do
+	// not all try at once; published marks one that succeeded.
+	publishing bool
+	published  bool
+	detail     string
 }
 
-func (r *request) expired(now time.Time) bool {
+// decidable reports whether a tap may still set a decision.
+func (r *request) decidable(now time.Time) bool {
+	return r.decided == decisionNone && now.Sub(r.createdAt) <= requestTTL
+}
+
+// collectable reports whether the record can be dropped. Decided requests
+// outlive undecided ones so that replays are recognized rather than looking
+// like a nonce that never existed.
+func (r *request) collectable(now time.Time) bool {
 	if r.decided != decisionNone {
 		return now.Sub(r.decidedAt) > retainAfterDecision
 	}
@@ -74,39 +90,102 @@ type store struct {
 
 func newStore() *store { return &store{m: make(map[string]*request)} }
 
-func (s *store) put(r *request) {
+// register records a new pending request, reporting false if the nonce is
+// already in flight. Re-issuing would mint a fresh tap URL for someone
+// else's pending request.
+func (s *store) register(r *request) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, exists := s.m[r.nonce]; exists {
+		return false
+	}
 	s.m[r.nonce] = r
+	return true
 }
 
-func (s *store) get(nonce string) (*request, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.m[nonce]
-	return r, ok
-}
-
-// decide records a decision if none has been made yet, returning the
-// decision now in force and whether this call set it. The server is
-// authoritative: the Mac also treats the first reply as final, but the two
-// halves agreeing should not depend on the client behaving.
-func (s *store) decide(nonce string, d decision) (current decision, first bool, err error) {
+// decide verifies the capability token and ensures the request has a
+// decision, reporting the one now in force. Token checking lives here so
+// that the whole rule is applied under one lock: a caller that read the
+// request first would race another tap writing it.
+//
+// The server is authoritative. The Mac also treats the first reply as
+// final, but the two halves agreeing should not depend on the client
+// behaving.
+func (s *store) decide(nonce, token string, d decision) (result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.m[nonce]
 	if !ok {
-		return decisionNone, false, errUnknown
+		return result{}, errUnknown
 	}
-	if r.expired(time.Now()) {
-		return decisionNone, false, errExpired
+	if subtle.ConstantTimeCompare([]byte(r.token), []byte(token)) != 1 {
+		// Someone has a valid nonce but the wrong token - worth seeing.
+		slog.Warn("tap with bad token", "nonce", nonce)
+		return result{}, errBadToken
 	}
+	now := time.Now()
 	if r.decided != decisionNone {
-		return r.decided, false, nil
+		// Re-tap of a decided request. It owes a publish only if the
+		// previous attempt is finished and failed - claiming the attempt
+		// here stops concurrent taps from all publishing at once.
+		if !r.published && !r.publishing {
+			r.publishing = true
+			return result{decision: r.decided, publish: true}, nil
+		}
+		return result{decision: r.decided}, nil
+	}
+	if !r.decidable(now) {
+		return result{}, errExpired
 	}
 	r.decided = d
-	r.decidedAt = time.Now()
-	return d, true, nil
+	r.decidedAt = now
+	r.publishing = true
+	return result{decision: d, publish: true}, nil
+}
+
+// markPublished records that the decision reached the response topic, so
+// later taps stop retrying.
+func (s *store) markPublished(nonce string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r, ok := s.m[nonce]; ok {
+		r.published = true
+		r.publishing = false
+	}
+}
+
+// releasePublish returns a failed attempt to the pool so a later tap can
+// retry it.
+func (s *store) releasePublish(nonce string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r, ok := s.m[nonce]; ok {
+		r.publishing = false
+	}
+}
+
+// detailFor returns the registered detail string for a decided request.
+func (s *store) detailFor(nonce string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r, ok := s.m[nonce]; ok {
+		return r.detail
+	}
+	return ""
+}
+
+// reapLoop drops collectable records until ctx is cancelled.
+func (s *store) reapLoop(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.reap()
+		}
+	}
 }
 
 func (s *store) reap() {
@@ -114,25 +193,50 @@ func (s *store) reap() {
 	defer s.mu.Unlock()
 	now := time.Now()
 	for k, r := range s.m {
-		if r.expired(now) {
+		if r.collectable(now) {
 			delete(s.m, k)
 		}
 	}
 }
 
+// userError pairs a failure with how it should be shown. Rendering lives
+// next to the definition so every path reports a given outcome identically.
+type userError struct {
+	code  int
+	title string
+	msg   string
+}
+
+func (e *userError) Error() string { return e.title }
+
 var (
-	errUnknown = errors.New("unknown nonce")
-	errExpired = errors.New("request expired")
+	// Unknown nonce and bad token render identically so a public caller
+	// cannot use the response to enumerate which nonces exist.
+	errUnknown  = &userError{http.StatusNotFound, "Not found", "No pending request, or that link is not valid for it."}
+	errExpired  = &userError{http.StatusGone, "Expired", "This request expired. Re-run the command to ask again."}
+	errBadToken = &userError{http.StatusNotFound, "Not found", "No pending request, or that link is not valid for it."}
 )
 
+// result is the outcome of a tap: the decision now in force, and whether
+// this tap set it. A replay is a normal outcome, not an error - only the
+// tap that set the decision publishes.
+type result struct {
+	decision decision
+	// publish is true when this tap owes a publish - either it set the
+	// decision, or an earlier tap set it but the publish failed. A decided
+	// request whose publish never landed must stay retriable, or the user
+	// taps again and is told "already decided" while the Mac never hears.
+	publish bool
+}
+
 type server struct {
-	store      *store
-	baseURL    string
-	ntfyURL    string
-	ntfyToken  string
-	respTopic  string
-	registerPW string
-	httpc      *http.Client
+	store         *store
+	baseURL       string
+	ntfyURL       string
+	ntfyToken     string
+	respTopic     string
+	registerToken string
+	client        *http.Client
 }
 
 func randHex(n int) (string, error) {
@@ -146,11 +250,12 @@ func randHex(n int) (string, error) {
 // register is called by the Mac before it publishes a request, so the
 // service only ever approves nonces it issued a token for. Reaching the
 // endpoint is not by itself enough to manufacture an approval.
-func (s *server) register(w http.ResponseWriter, r *http.Request) {
-	if !s.authedRegister(r) {
+func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if !s.registerAuthorized(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
@@ -160,18 +265,26 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid nonce", http.StatusBadRequest)
 		return
 	}
-	if _, exists := s.store.get(nonce); exists {
-		// Re-issuing would mint a fresh tap URL for someone else's pending
-		// request.
-		http.Error(w, "nonce already registered", http.StatusConflict)
-		return
-	}
 	tok, err := randHex(32)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	s.store.put(&request{nonce: nonce, token: tok, createdAt: time.Now(), detail: r.FormValue("detail")})
+	detail := r.FormValue("detail")
+	if len(detail) > maxDetailLen {
+		detail = detail[:maxDetailLen]
+	}
+	detail = strings.Map(func(c rune) rune {
+		if c < 0x20 || c == 0x7f {
+			return -1
+		}
+		return c
+	}, detail)
+
+	if !s.store.register(&request{nonce: nonce, token: tok, createdAt: time.Now(), detail: detail}) {
+		http.Error(w, "nonce already registered", http.StatusConflict)
+		return
+	}
 
 	approve := fmt.Sprintf("%s/d/%s/%s/approve", s.baseURL, url.PathEscape(nonce), tok)
 	deny := fmt.Sprintf("%s/d/%s/%s/deny", s.baseURL, url.PathEscape(nonce), tok)
@@ -180,8 +293,8 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		approve, deny, int(requestTTL.Seconds()))
 }
 
-func (s *server) authedRegister(r *http.Request) bool {
-	if s.registerPW == "" {
+func (s *server) registerAuthorized(r *http.Request) bool {
+	if s.registerToken == "" {
 		return false
 	}
 	h := r.Header.Get("Authorization")
@@ -189,7 +302,7 @@ func (s *server) authedRegister(r *http.Request) bool {
 	if !strings.HasPrefix(h, p) {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, p)), []byte(s.registerPW)) == 1
+	return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, p)), []byte(s.registerToken)) == 1
 }
 
 func isSafeNonce(s string) bool {
@@ -202,14 +315,10 @@ func isSafeNonce(s string) bool {
 }
 
 // decide handles the tap. Path: /d/<nonce>/<token>/<approve|deny>
-func (s *server) decide(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleTap(w http.ResponseWriter, r *http.Request) {
 	nonce := chi.URLParam(r, "nonce")
 	tok := chi.URLParam(r, "token")
 	verb := chi.URLParam(r, "verb")
-	if nonce == "" || tok == "" || verb == "" {
-		s.page(w, http.StatusBadRequest, "Bad request", "That link is malformed.")
-		return
-	}
 
 	var d decision
 	switch verb {
@@ -222,78 +331,77 @@ func (s *server) decide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, ok := s.store.get(nonce)
-	if !ok {
-		s.page(w, http.StatusNotFound, "Not found", "No pending request with that id. It may have expired.")
-		return
-	}
-	// Constant-time compare so a wrong token can't be discovered by timing.
-	if subtle.ConstantTimeCompare([]byte(req.token), []byte(tok)) != 1 {
-		s.page(w, http.StatusForbidden, "Forbidden", "That link is not valid for this request.")
-		return
-	}
-	if req.expired(time.Now()) {
-		s.page(w, http.StatusGone, "Expired", "This request expired. Re-run the command to ask again.")
-		return
-	}
-
-	current, first, err := s.store.decide(nonce, d)
-	switch {
-	case errors.Is(err, errUnknown):
-		s.page(w, http.StatusNotFound, "Not found", "No pending request with that id.")
-		return
-	case errors.Is(err, errExpired):
-		s.page(w, http.StatusGone, "Expired", "This request expired.")
-		return
-	case err != nil:
+	res, err := s.store.decide(nonce, tok, d)
+	if err != nil {
+		var ue *userError
+		if errors.As(err, &ue) {
+			s.page(w, ue.code, ue.title, ue.msg)
+			return
+		}
 		s.page(w, http.StatusInternalServerError, "Error", "Something went wrong.")
 		return
 	}
 
-	if !first {
+	if !res.publish {
 		s.page(w, http.StatusOK, "Already decided",
-			fmt.Sprintf("This request was already %sd. Nothing further was sent.", current))
+			fmt.Sprintf("This request was already %sd. Nothing further was sent.", res.decision))
 		return
 	}
 
-	if err := s.publish(string(current), nonce, req.detail); err != nil {
+	if err := s.publish(res.decision, nonce, s.store.detailFor(nonce)); err != nil {
+		s.store.releasePublish(nonce)
 		slog.Error("publish failed", "nonce", nonce, "err", err)
 		s.page(w, http.StatusBadGateway, "Could not notify",
-			"The decision was recorded but publishing it failed. The command will time out and deny.")
+			"Could not reach the notification service. Tap again to retry.")
 		return
 	}
-	slog.Info("decided", "nonce", nonce, "decision", current)
+	s.store.markPublished(nonce)
+	slog.Info("decided", "nonce", nonce, "decision", res.decision)
+
 	title := "Approved"
-	if current == decisionDeny {
+	if res.decision == decisionDeny {
 		title = "Denied"
 	}
-	s.page(w, http.StatusOK, title, fmt.Sprintf("Sent %q. You can close this page.", string(current)+" "+nonce))
+	s.page(w, http.StatusOK, title, fmt.Sprintf("Sent %q. You can close this page.", res.decision))
 }
 
 // publish writes the decision to the response topic, which this service
 // holds the only credential for.
-func (s *server) publish(dec, nonce, detail string) error {
-	body := dec + " " + nonce
-	req, err := http.NewRequest(http.MethodPost, s.ntfyURL+"/"+s.respTopic, strings.NewReader(body))
+func (s *server) publish(d decision, nonce, detail string) error {
+	// Deliberately NOT the request context: the decision is already
+	// recorded, and the replay guard stops a retry from re-publishing. If
+	// the phone closed the connection after tapping, cancelling here would
+	// strand the store saying "approved" while the Mac never hears it.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		s.ntfyURL+"/"+s.respTopic, strings.NewReader(decisionBody(d, nonce)))
 	if err != nil {
-		return err
+		return fmt.Errorf("build publish request: %w", err)
 	}
 	if s.ntfyToken != "" {
 		req.Header.Set("Authorization", "Bearer "+s.ntfyToken)
 	}
-	req.Header.Set("Title", "approval "+dec)
+	req.Header.Set("Title", "approval "+string(d))
 	if detail != "" {
 		req.Header.Set("X-Detail", detail)
 	}
-	resp, err := s.httpc.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("publish to topic %q: %w", s.respTopic, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("ntfy returned %s", resp.Status)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("publish to topic %q: ntfy returned %s", s.respTopic, resp.Status)
 	}
 	return nil
+}
+
+// decisionBody is the wire format the Mac parses. Defined once so the page
+// and the published message cannot drift apart.
+func decisionBody(d decision, nonce string) string {
+	return string(d) + " " + nonce
 }
 
 func (s *server) page(w http.ResponseWriter, code int, title, msg string) {
@@ -309,6 +417,21 @@ p{margin:0;color:#aaa;line-height:1.5}</style><div><h1>%s</h1><p>%s</p></div>`,
 		html.EscapeString(title), html.EscapeString(title), html.EscapeString(msg))
 }
 
+// routeLogger logs the matched route pattern rather than the raw URI, so
+// the capability token in the path is never written anywhere.
+func routeLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		slog.Info("request",
+			"method", r.Method,
+			"route", chi.RouteContext(r.Context()).RoutePattern(),
+			"status", ww.Status(),
+			"duration_ms", time.Since(start).Milliseconds())
+	})
+}
+
 func mustEnv(k string) string {
 	v := os.Getenv(k)
 	if v == "" {
@@ -319,29 +442,29 @@ func mustEnv(k string) string {
 }
 
 func main() {
-	s := &server{
-		store:      newStore(),
-		baseURL:    strings.TrimSuffix(mustEnv("BASE_URL"), "/"),
-		ntfyURL:    strings.TrimSuffix(mustEnv("NTFY_URL"), "/"),
-		ntfyToken:  mustEnv("NTFY_TOKEN"),
-		respTopic:  mustEnv("RESPONSE_TOPIC"),
-		registerPW: mustEnv("REGISTER_TOKEN"),
-		httpc:      &http.Client{Timeout: 10 * time.Second},
-	}
-
-	go func() {
-		for range time.Tick(time.Minute) {
-			s.store.reap()
-		}
-	}()
-
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
+	s := &server{
+		store:         newStore(),
+		baseURL:       strings.TrimSuffix(mustEnv("BASE_URL"), "/"),
+		ntfyURL:       strings.TrimSuffix(mustEnv("NTFY_URL"), "/"),
+		ntfyToken:     mustEnv("NTFY_TOKEN"),
+		respTopic:     mustEnv("RESPONSE_TOPIC"),
+		registerToken: mustEnv("REGISTER_TOKEN"),
+		client:        &http.Client{Timeout: 10 * time.Second},
+	}
+
+	// Runs for the life of the process; the server never returns normally.
+	go s.store.reapLoop(context.Background(), time.Minute)
+
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	// NOT middleware.Logger: it writes r.RequestURI verbatim, which would
+	// put live capability tokens in the log on every tap, before the
+	// handler even runs. Log the route pattern instead.
+	r.Use(routeLogger)
 	r.Use(middleware.Recoverer)
-	r.Post("/register", s.register)
-	r.Get("/d/{nonce}/{token}/{verb}", s.decide)
+	r.Post("/register", s.handleRegister)
+	r.Get("/d/{nonce}/{token}/{verb}", s.handleTap)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
@@ -350,6 +473,9 @@ func main() {
 		Addr:              "0.0.0.0:3000",
 		Handler:           r,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	slog.Info("approvald started", "addr", ":3000")
 	if err := srv.ListenAndServe(); err != nil {
