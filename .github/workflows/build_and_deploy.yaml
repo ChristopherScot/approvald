@@ -68,26 +68,14 @@ jobs:
             ${{ env.REGISTRY }}/christopherscot/${{ steps.extract-repo-name.outputs.repo }}:${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # Writes the rendered manifests + new image into the homelab repo.
-      # config.yaml uses deployment_override, so the hand-written manifest
-      # (ExternalSecret, securityContext, probes, pull secret) is preserved
-      # and only {{ .ImageURL }} is substituted. Needs ci-scripts >= v0.0.6.
-      - name: Argo Publish
-        if: github.ref == 'refs/heads/main'
-        env:
-          GITHUB_TOKEN: ${{ secrets.CI_PAT }}
-        run: |
-          git clone https://x-access-token:${GITHUB_TOKEN}@github.com/ChristopherScot/homelab.git
-          cd homelab
-          latest_release_url=$(curl -s https://api.github.com/repos/ChristopherScot/ci-scripts/releases/latest | jq -r '.assets[] | select(.name == "argo-update.tar.gz") | .browser_download_url')
-          curl -L -o argo-update.tar.gz $latest_release_url
-          tar -xzvf argo-update.tar.gz
-          chmod +x argo-update
-          ./argo-update ../config.yaml ghcr.io/christopherscot/${{ steps.extract-repo-name.outputs.repo }}:${{ github.sha }}
-          rm -rf argo-update argo-update.tar.gz
-          git config --global user.email "CI@ChrisScotMartin.com"
-          git config --global user.name "CI"
-          git add .
-          git diff --staged --quiet && echo "no manifest change" && exit 0
-          git commit -m "CI Action from repo: ${{ steps.extract-repo-name.outputs.repo }}, commit: ${{ github.sha }}"
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/ChristopherScot/homelab.git
+      # No Argo Publish step. The template pushes rendered manifests from
+      # here into the homelab repo, which needs a CI_PAT able to write that
+      # repo - a long-lived credential, held in a service repo, with write
+      # access to the repository that controls the whole cluster. That token
+      # has never existed in this setup.
+      #
+      # Instead argocd-image-updater watches GHCR from inside the cluster
+      # and writes each new :latest digest into the homelab repo using
+      # Argo's own credentials. Same push-to-deploy, same digest recorded in
+      # git, no new credential. See the annotations on
+      # app-of-apps/apps/approvald.yaml in the homelab repo.
