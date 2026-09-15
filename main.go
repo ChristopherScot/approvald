@@ -32,6 +32,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
@@ -562,6 +563,9 @@ func main() {
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
+	// The deployment annotates this pod for scraping; without a handler
+	// those annotations point at a 404 and the target reads as down.
+	r.Handle("/metrics", promhttp.Handler())
 
 	addr := "0.0.0.0:" + envOr("PORT", "3000")
 	srv := &http.Server{
