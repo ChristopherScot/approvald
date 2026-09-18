@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ogen-go/ogen/middleware"
+	"github.com/ogen-go/ogen/ogenerrors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -128,14 +129,36 @@ func (svc service) Tap(_ context.Context, p api.TapParams) (api.TapRes, error) {
 	return &api.TapOK{Data: strings.NewReader(pg.render())}, nil
 }
 
-// NewError renders a handler's error as the spec's Error schema, and
-// logs it - ogen returns it to the caller but does not log it, so
-// without this a 500 leaves nothing on the server saying what happened.
+// NewError renders an error as the spec's Error schema, and logs it -
+// ogen returns the error to the caller but does not log it, so without
+// this a failure leaves nothing on the server saying what happened.
+//
+// The status comes from ogen where ogen knows it. This is not only the
+// handler's errors: a rejected bearer token, an undecodable body and a
+// bad path parameter all arrive here as typed errors carrying their own
+// status. Answering 500 to all of them told an unauthorized caller that
+// the service was broken, when it had correctly refused them.
+//
+// Anything without a status of its own is ours and unexpected, so it is
+// a 500 - and the message is fixed, because an internal error string is
+// not something a caller should be told.
 func (svc service) NewError(_ context.Context, err error) *api.ErrorStatusCode {
-	slog.Error("handler failed", "err", err)
+	code := ogenerrors.ErrorCode(err)
+	if code == 0 {
+		code = http.StatusInternalServerError
+	}
+
+	msg := http.StatusText(code)
+	if code == http.StatusInternalServerError {
+		slog.Error("handler failed", "err", err)
+		msg = "internal error"
+	} else {
+		slog.Info("request refused", "status", code, "err", err)
+	}
+
 	return &api.ErrorStatusCode{
-		StatusCode: http.StatusInternalServerError,
-		Response:   api.Error{Message: "internal error"},
+		StatusCode: code,
+		Response:   api.Error{Message: msg},
 	}
 }
 

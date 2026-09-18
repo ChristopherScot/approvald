@@ -147,3 +147,56 @@ func tokenFromURL(t *testing.T, u string) string {
 	}
 	return parts[len(parts)-2]
 }
+
+// A refused request must answer with the status the spec documents, not
+// 500. ogen delivers a rejected bearer token, an undecodable body and a
+// bad path parameter to NewError as typed errors carrying their own
+// status; returning 500 for all of them told an unauthorized caller the
+// service was broken when it had correctly refused them.
+func TestRefusalsUseTheirOwnStatus(t *testing.T) {
+	h, err := handlerWith(testService(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		req  *http.Request
+		want int
+	}{
+		{
+			"no bearer token",
+			httptest.NewRequest(http.MethodPost, "/register",
+				strings.NewReader("nonce=x")),
+			http.StatusUnauthorized,
+		},
+		{
+			"wrong bearer token",
+			withAuth(httptest.NewRequest(http.MethodPost, "/register",
+				strings.NewReader("nonce=x")), "Bearer nope"),
+			http.StatusUnauthorized,
+		},
+		{
+			"verb outside the enum",
+			httptest.NewRequest(http.MethodGet, "/d/n/t/maybe", nil),
+			http.StatusBadRequest,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, tc.req)
+			if w.Code != tc.want {
+				t.Errorf("status = %d, want %d - body: %s", w.Code, tc.want, w.Body.String())
+			}
+			if w.Code == http.StatusInternalServerError {
+				t.Error("a refused request reported the service as broken")
+			}
+		})
+	}
+}
+
+func withAuth(r *http.Request, v string) *http.Request {
+	r.Header.Set("Authorization", v)
+	return r
+}
