@@ -1,5 +1,35 @@
 package main
 
+// How this service starts. Deliberately knows nothing about what it
+// serves - it calls handler() and runs whatever comes back - so this
+// file is the same for a JSON API, a redirector and a reverse proxy.
+//
+// THIS FILE IS YOURS. Nothing regenerates it: `homelabctl regen` writes
+// only api/ and the lockfile, and `init` skips any file that already
+// exists. Edit it for a second listener, a background worker, extra
+// validation before serving, or different shutdown timing.
+//
+// server.go implements the generated api.Handler, so adding a path to
+// openapi.yml and running `homelabctl regen` makes the build fail until
+// a method exists for it. Two things it still owes this file:
+//
+//   - handler() (http.Handler, error). The error is not decoration -
+//     hand-written setup can fail, and main exits with the message
+//     rather than panicking on a nil handler.
+//   - that the returned handler serves /metrics, and the path in
+//     `probes.path`. Neither is checked here: they fail in the cluster,
+//     as a scrape target that reads down and a pod that never becomes
+//     ready.
+//
+// What is NOT yours, because something rewrites it:
+//
+//   api/, clients/          `homelabctl regen`, from openapi.yml
+//   deploy/*.yaml           `homelabctl render`, from config.yaml
+//   config.schema.json      `homelabctl init`, a copy of a constant
+//
+// Everything else - the Dockerfile, CI, .gitignore - is generated once
+// and then yours, so a later convention change will not reach it.
+
 import (
 	"context"
 	"errors"
@@ -9,7 +39,6 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-
 )
 
 // version is stamped by CI with -ldflags "-X main.version=...". The
