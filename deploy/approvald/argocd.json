@@ -1,0 +1,6 @@
+{
+  "name": "approvald",
+  "team": "me-myself-and-i",
+  "namespace": "approvald",
+  "image": "ghcr.io/christopherscot/approvald"
+}
