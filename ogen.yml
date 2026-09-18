@@ -1,0 +1,17 @@
+# ogen generator options.
+#
+# ogen instruments every operation with OpenTelemetry by default, which
+# costs a consumer of this service's client 13 modules and ~1.5MB of
+# binary - and produces spans that go nowhere unless something configures
+# a TracerProvider and a collector exists to receive them.
+#
+# Neither is true here: nothing configures a tracer, and the cluster runs
+# no tracing backend. Turn this back on in the same commit that adds one,
+# not before - instrumentation nobody collects is cost without benefit.
+#
+# Metrics and request logging do not come from here. They are our own
+# middleware in server.go, keyed on the spec's operation IDs.
+generator:
+  features:
+    disable:
+      - 'ogen/otel'

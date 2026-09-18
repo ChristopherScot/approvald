@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "homelab service",
+  "type": "object",
+  "required": ["name", "team", "runtime"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z]([a-z0-9-]{0,38}[a-z0-9])?$",
+      "description": "DNS label: lowercase letters, digits and hyphens, starting with a letter."
+    },
+    "team": { "type": "string", "description": "Owning team; becomes a label on every resource." },
+    "runtime": {
+      "type": "string",
+      "description": "Which language/shape plugin builds this. See homelabctl init --help.",
+      "examples": ["go-service", "node-service", "go-cli"]
+    },
+    "module": {
+      "type": "string",
+      "description": "Go module path. Derived from the repo (and the service directory, in a monorepo) unless set here - needed when the repo is not named after the service. Go requires this to match where the module is fetched from.",
+      "examples": ["github.com/owner/go-widget"]
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["service", "cronjob"],
+      "default": "service",
+      "description": "What Kubernetes shape this becomes. A service is long-running; a cronjob runs on a schedule and gets no Service, probes or ingress."
+    },
+    "schedule": {
+      "type": "string",
+      "description": "Cron expression. Required for kind: cronjob."
+    },
+    "timeZone": {
+      "type": "string",
+      "default": "UTC",
+      "description": "Zone the schedule is read in. Without it Kubernetes uses UTC, so a schedule reading 3am fires at 11pm ET the evening before.",
+      "examples": ["America/New_York"]
+    },
+    "namespace": { "type": "string", "description": "Defaults to the service name." },
+    "replicas": { "type": "integer", "minimum": 1, "default": 1 },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 3000 },
+    "hardened": {
+      "type": "boolean",
+      "default": true,
+      "description": "Run non-root with a read-only root filesystem. Leave on unless the image cannot."
+    },
+    "metrics": {
+      "type": "boolean",
+      "default": true,
+      "description": "Annotate the pod for Prometheus scraping. The service must serve /metrics."
+    },
+    "spec": {
+      "type": "boolean",
+      "default": true,
+      "description": "Generate the API from openapi.yml. Set false to hand-write server.go instead - no spec, no generated client for consumers to import."
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "description": "Registry path without a tag." }
+      }
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Plain environment variables. Secrets belong under 'secrets'."
+    },
+    "secrets": {
+      "type": "object",
+      "required": ["vaultPath", "keys"],
+      "additionalProperties": false,
+      "description": "Generates a SecretStore and ExternalSecret bound to this service's own Vault path.",
+      "properties": {
+        "vaultPath": { "type": "string", "description": "Path under kv, e.g. myservice/config." },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Environment variables to inject. NAME reads the property 'name'; a NAME: prop mapping reads 'prop', for a Vault path whose property is not named after the variable.",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 1,
+                "additionalProperties": { "type": "string" }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "required": ["hosts"],
+      "additionalProperties": false,
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Hostnames this service answers on. A bare name derives TLS from the name itself: a single label or a private suffix (.lab, .local, .internal) cannot be certified by a public CA. Use a name/tls mapping only when that derivation is wrong.",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string" },
+                  "tls": { "type": "boolean" }
+                }
+              }
+            ]
+          }
+        },
+        "public": { "type": "boolean", "description": "Route via the internet-facing controller instead of the LAN one." },
+        "authelia": { "type": "boolean", "description": "Put Authelia forward-auth in front. LAN-only; cannot be combined with public." }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "path": { "type": "string", "default": "/healthz" } }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpuRequest": { "type": "string", "default": "10m" },
+        "memoryRequest": { "type": "string", "default": "32Mi" },
+        "memoryLimit": { "type": "string", "default": "64Mi" }
+      }
+    },
+    "patches": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Adjust generated manifests without owning them. Keyed by resource kind (Deployment, Service, CronJob, Ingress, Namespace); each value is a YAML fragment merged into that resource. Supply only what differs so later convention changes still apply.",
+      "examples": [{ "Deployment": "spec:\n  template:\n    metadata:\n      annotations:\n        example.com/team: platform\n" }]
+    },
+    "overrides": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Replace a generated file wholesale. This opts the service OUT of future convention changes for that file - prefer patches. {{ .ImageURL }} is substituted."
+    }
+  }
+}

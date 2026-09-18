@@ -1,0 +1,197 @@
+# The contract this service serves. Everything under api/ is generated
+# from this file: add a path here, run `homelabctl regen`, and the build
+# fails until a handler exists for it.
+openapi: 3.0.3
+info:
+  title: approvald
+  description: |
+    One-tap approval gating. A machine registers a nonce and gets two
+    single-use URLs; a person taps one on their phone; the decision is
+    published to ntfy for the waiting machine to read.
+  version: 0.1.0
+
+paths:
+  /register:
+    post:
+      operationId: register
+      summary: Register a nonce and mint its tap URLs
+      description: |
+        Called by the machine that wants approval, with a bearer token.
+        Form-encoded rather than JSON because the caller is a shell
+        script using `curl -d`, for which form encoding is the natural
+        shape.
+      security:
+        - registerToken: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [nonce]
+              properties:
+                nonce:
+                  type: string
+                  maxLength: 128
+                  description: Caller's identifier for this request; must be unique while pending.
+                detail:
+                  type: string
+                  maxLength: 512
+                  description: Shown to the person deciding. Truncated, control characters stripped.
+      responses:
+        default:
+          description: An error this operation does not otherwise document.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '200':
+          description: The nonce was registered and its URLs minted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Registration'
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409':
+          description: That nonce is already registered and still pending.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /d/{nonce}/{token}/{verb}:
+    parameters:
+      - { $ref: '#/components/parameters/Nonce' }
+      - { $ref: '#/components/parameters/Token' }
+      - { $ref: '#/components/parameters/Verb' }
+    get:
+      operationId: tapConfirm
+      summary: The confirmation page a person lands on
+      description: |
+        HTML, because the consumer is a thumb on a phone. Renders a
+        button that POSTs to this same path - a GET must not decide
+        anything, since link previews and prefetchers issue GETs.
+      responses:
+        default:
+          description: An error this operation does not otherwise document.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '200':
+          description: A page with a button confirming the decision.
+          content:
+            text/html:
+              schema: { type: string }
+        '404':
+          description: An explanation for a person.
+          content:
+            text/html:
+              schema: { type: string }
+        '410':
+          description: An explanation for a person.
+          content:
+            text/html:
+              schema: { type: string }
+    post:
+      operationId: tap
+      summary: Record the decision and publish it
+      responses:
+        default:
+          description: An error this operation does not otherwise document.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '200':
+          description: The decision was recorded and published.
+          content:
+            text/html:
+              schema: { type: string }
+        '404':
+          description: An explanation for a person.
+          content:
+            text/html:
+              schema: { type: string }
+        '410':
+          description: An explanation for a person.
+          content:
+            text/html:
+              schema: { type: string }
+        '502':
+          description: An explanation for a person.
+          content:
+            text/html:
+              schema: { type: string }
+
+  # Any operation may fail in a way it does not document. `default` is
+  # what lets ogen generate an ErrorStatusCode for those, so a handler
+  # error becomes a documented JSON body rather than an empty 500.
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Readiness and liveness
+      responses:
+        default:
+          description: An error this operation does not otherwise document.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '200':
+          description: The service is up.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+components:
+  securitySchemes:
+    registerToken:
+      type: http
+      scheme: bearer
+      description: The shared secret in REGISTER_TOKEN.
+
+  parameters:
+    Nonce:
+      name: nonce
+      in: path
+      required: true
+      schema: { type: string, maxLength: 128 }
+    Token:
+      name: token
+      in: path
+      required: true
+      description: |
+        A single-use capability. It is in the URL, so nothing may log or
+        echo the request path - see the note in server.go.
+      schema: { type: string }
+    Verb:
+      name: verb
+      in: path
+      required: true
+      schema: { type: string, enum: [approve, deny] }
+
+  responses:
+    Error:
+      description: The request was rejected.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Registration:
+      type: object
+      required: [approve_url, deny_url, expires_in_seconds]
+      properties:
+        # Plain strings rather than format: uri. ogen maps that format to
+        # url.URL, which would mean parsing a URL this service just built
+        # from its own configuration - a round trip that can only lose.
+        approve_url: { type: string }
+        deny_url: { type: string }
+        expires_in_seconds: { type: integer }
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }

@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: approvald
+  namespace: approvald
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: public
+  tls:
+    - hosts: [approve.chrisscotmartin.com]
+      secretName: approvald-tls
+  rules:
+    - host: approve.chrisscotmartin.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: approvald
+                port:
+                  number: 80

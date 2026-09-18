@@ -1,0 +1,29 @@
+name: approvald
+team: me-myself-and-i
+runtime: go-service
+
+# Go module paths are case-sensitive and must match where the module is
+# fetched from. The GitHub owner is ChristopherScot; deriving this from
+# the lowercase --owner flag produces a path no consumer can `go get`.
+module: github.com/ChristopherScot/approvald
+port: 3000
+image:
+  repository: ghcr.io/christopherscot/approvald
+env:
+  BASE_URL: "https://approve.chrisscotmartin.com"
+  NTFY_URL: "http://ntfy.ntfy.svc.cluster.local"
+  RESPONSE_TOPIC: "approvals-resp"
+secrets:
+  vaultPath: approvald/config
+  keys:
+    - NTFY_TOKEN: ntfy_token
+    - REGISTER_TOKEN: register_token
+probes:
+  path: /healthz
+resources:
+  cpuRequest: 10m
+  memoryRequest: 32Mi
+  memoryLimit: 64Mi
+ingress:
+  hosts: [approve.chrisscotmartin.com]
+  public: true
