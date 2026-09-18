@@ -1,0 +1,14 @@
+{
+  "name": "@christopherscot/approvald-client",
+  "version": "0.1.0",
+  "description": "Typed client for the approvald API, generated from its OpenAPI spec.",
+  "type": "module",
+  "main": "clients/ts/index.js",
+  "types": "clients/ts/index.d.ts",
+  "files": [
+    "clients/ts"
+  ],
+  "dependencies": {
+    "openapi-fetch": "^0.17.0"
+  }
+}

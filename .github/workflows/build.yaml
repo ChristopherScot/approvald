@@ -1,0 +1,141 @@
+# Builds and pushes the image. Deployment happens in-cluster:
+# argocd-image-updater watches the registry and commits the new digest to
+# the homelab repo itself, so this workflow needs no homelab credential -
+# GITHUB_TOKEN is issued per run and can only push packages.
+name: build approvald
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Two pushes in quick succession otherwise race to publish :latest, and
+# whichever loses is the digest image-updater may pick up.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test -race ./...
+
+      # CGO_ENABLED=0: a cgo binary links against glibc and will not run on
+      # alpine, and that only shows up at container start.
+      #
+      # -X main.version stamps the commit into the binary, so every log
+      # line says which build produced it. Without it main.version stays
+      # "dev" and the field is worse than absent.
+      - name: Build
+        run: |
+          CGO_ENABLED=0 go build \
+            -ldflags "-X main.version=$GITHUB_SHA" \
+            -o bin/app .
+
+      # One binary for both checks below. Downloaded rather than built so
+      # CI does not depend on this repo being able to compile it.
+      - name: Install homelabctl
+        run: curl -fsSL https://github.com/ChristopherScot/ci-scripts/releases/latest/download/homelabctl_linux_amd64.tar.gz | tar -xz
+
+      # openapi.yml is the source of truth, so everything derived from it
+      # - the server interface, both clients, the versions they report -
+      # must match what is committed. Otherwise a spec change merges with
+      # stale code and the API quietly diverges from its documentation.
+      #
+      # `regen` runs the same commands `init` does, so CI cannot check a
+      # different thing than a developer regenerates.
+      # regen is deterministic - it generates from the spec and does not
+      # touch dependencies - so the whole tree can be diffed. Anything it
+      # changes here is something a spec edit should have regenerated.
+      - name: Check generated code is current
+        run: |
+          ./homelabctl regen
+          git diff --exit-code \
+            || { echo "::error::generated code is stale - run 'homelabctl regen' and commit"; exit 1; }
+
+      - name: Check deploy manifests
+        run: ./homelabctl check deploy
+
+      # buildx, because cache-from/cache-to type=gha below need it: the
+      # default docker driver cannot export a cache and fails the build
+      # with "Cache export is not supported for the docker driver".
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/christopherscot/approvald
+          # Full SHA: an abbreviated one is not a registry tag and gives
+          # ImagePullBackOff.
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Tagging the repo IS releasing the client: api/ is committed and
+  # self-contained, so a consumer runs `go get <repo>@<tag>`. No registry
+  # and no publish step - the tag is the artifact.
+  #
+  # Keyed on the spec's info.version so one version covers the API and its
+  # clients, and so a release is deliberate rather than every push.
+  tag:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Tag when the spec version changed
+        run: |
+          version=$(grep -m1 '^  version:' openapi.yml | awk '{print $2}')
+          if [ -z "$version" ]; then
+            echo "::error::openapi.yml has no info.version"
+            exit 1
+          fi
+
+          # Nothing to do unless this push changed the spec's version.
+          if ! git diff HEAD~1 HEAD -- openapi.yml | grep -q '^+  version:'; then
+            echo "spec version unchanged; nothing to tag"
+            exit 0
+          fi
+
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "::error::v$version already exists - bump info.version"
+            exit 1
+          fi
+
+          git tag "v$version"
+          git push origin "v$version"
+          echo "tagged v$version - consumers can now: go get $GITHUB_REPOSITORY@v$version"

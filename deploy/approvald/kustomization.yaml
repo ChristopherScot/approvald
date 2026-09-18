@@ -1,0 +1,13 @@
+# Required: argocd-image-updater writes the image digest into the
+# `images:` block below. Without this file the app renders as a plain
+# Directory and image automation silently skips it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+  - externalsecret.yaml
+  - ingress.yaml
+images:
+  - name: ghcr.io/christopherscot/approvald
+    newTag: latest

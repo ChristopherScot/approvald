@@ -1,97 +1,88 @@
 # approvald
 
-One-tap approval endpoint for commands that need a human in the loop.
+Owned by me-myself-and-i.
 
-## Why
+## The spec is the source of truth
 
-A wrapper on the Mac gates a command behind an approval sent to Chris's
-phone. The wrapper must be able to ask for approval and learn the answer,
-but it must not be able to answer its own question — otherwise anything
-running on that Mac could self-approve and the gate is decorative.
+`openapi.yml` describes this API. Everything else is generated from it:
 
-So the Mac's ntfy token is write-only on `approvals-req` and read-only on
-`approvals-resp`. Only this service can publish to `approvals-resp`, and it
-runs in the cluster.
-
-## Flow
-
-1. Mac `POST /register` with a nonce → gets a one-time capability token and
-   the tap URLs that embed it.
-2. Mac publishes the request to `approvals-req` with those URLs as ntfy
-   action buttons.
-3. Chris taps. This service verifies the token, records the decision, and
-   publishes `approve <nonce>` / `deny <nonce>` to `approvals-resp`.
-4. Mac, polling `approvals-resp`, sees the decision.
-
-The tap URL is the credential: unguessable, single-use, and it expires with
-the request. A leaked one grants a single approval rather than all of them —
-which is why this is not a login session.
-
-## Endpoints
-
-| Route | Auth | Purpose |
+| path | what | regenerate with |
 |---|---|---|
-| `POST /register` | `Authorization: Bearer $REGISTER_TOKEN` | Register a nonce, mint tap URLs |
-| `GET /d/{nonce}/{token}/{verb}` | the token in the path | Render a confirmation button (decides nothing) |
-| `POST /d/{nonce}/{token}/{verb}` | the token in the path | Record + publish the decision |
-| `GET /healthz` | none | Liveness |
+| `api/oas_*.go` | server interface, types, validation, Go client | `homelabctl regen` |
+| `clients/ts/schema.d.ts` | TypeScript types | `homelabctl regen` |
 
-`verb` is `approve` or `deny`.
+**Change the API in `openapi.yml`, never in Go.** Add a path, run
+`homelabctl regen`, and the build will fail until you write the handler:
 
-## Configuration
+```
+service does not implement api.Handler (missing method GetThing)
+```
 
-All required:
+That is the point — the code cannot drift from the spec, because it will
+not compile if it does. CI runs `homelabctl regen` and fails on a diff, so
+a spec change cannot merge without the code that matches it.
 
-| Env | Meaning |
-|---|---|
-| `BASE_URL` | Public base URL, used to build tap links |
-| `NTFY_URL` | ntfy base URL (in-cluster service) |
-| `NTFY_TOKEN` | Token that can write the response topic |
-| `RESPONSE_TOPIC` | Topic decisions are published to |
-| `REGISTER_TOKEN` | Shared secret the Mac uses to register |
+## Layout
 
-## Behaviour worth knowing
+```
+openapi.yml          the API contract
+main.go              process lifecycle: logging, timeouts, shutdown
+server.go            handlers, metrics middleware, route mounting
+api/                 generated, plus two files that are not:
+  client.go            timeouts, retries, circuit breaking
+  paging.go            cursor iteration as a range loop
+clients/ts/          the TypeScript client
+deploy/              Kubernetes manifests, rendered from config.yaml
+config.yaml          what this service is, for homelabctl
+```
 
-- Unregistered nonces are rejected, so reaching the endpoint is not by
-  itself enough to manufacture an approval.
-- First decision wins. A second tap reports "already decided" and publishes
-  nothing.
-- Undecided requests expire after 10 minutes; decided ones are retained 30
-  minutes so replays are rejected rather than re-published.
-- A GET never decides. The tap link is opened by a browser navigation,
-  which is a GET, so the link is hit by anything that previews, scans, or
-  speculatively prefetches it - each of which would otherwise approve a
-  production credential request. GET renders a button; the POST it submits
-  makes the decision. `Cache-Control: no-store` is set too, but it does not
-  help here: the request still reaches the server.
-- A decision whose publish failed stays retriable: tapping again retries
-  rather than reporting "already decided". The decision itself never
-  changes once set.
-- Request logging deliberately records the matched route pattern, never the
-  raw URI - the URI contains a live capability token.
-- Unknown nonces and bad tokens return an identical response, so a public
-  caller cannot use it to enumerate which nonces exist.
+`server.go` is the seam: a service whose shape the spec cannot express - a
+reverse proxy, say - replaces that one file with a hand-written
+`handler()`, and everything else stays as generated. Its header lists what
+a replacement has to keep.
 
-## Operational constraints
+`api/client.go` and `api/paging.go` are hand-written and live in `api/` on
+purpose: a consumer imports that package, and getting the protocol client
+without the defaults would be worse than useless.
 
-**Single replica, in-memory state.** Pending approvals live in process
-memory, so two replicas would each see only their own and roughly half of
-all taps would 404. The Deployment pins `replicas: 1` with
-`strategy: Recreate`; do not scale it.
+## Working on it
 
-**A restart drops pending approvals.** They fail closed - the Mac times
-out and denies, and the command is re-run. This is deliberate: persistence
-would add a database dependency to a service whose job is gating database
-credentials, and the cost of the failure is one re-run.
+```sh
+go test ./...                    # server, client and paging
+go run .                         # PORT=3000 by default
+homelabctl regen                 # after editing openapi.yml
+homelabctl check deploy          # deploy manifests and spec problems
+homelabctl diff                  # what would change in the GitOps repo
+```
 
-## Contract with the caller
+Bump `info.version` in `openapi.yml` when the API changes, then
+`homelabctl regen` — it syncs the version the clients report. CI tags the
+repo on a version change, and that tag is how both clients are released:
 
-The Mac side depends on all of these:
+```sh
+go get github.com/christopherscot/approvald@v0.2.0
+npm install git+https://github.com/christopherscot/approvald#v0.2.0
+```
 
-| | |
-|---|---|
-| Wire format | `approve <nonce>` / `deny <nonce>`, published to the response topic |
-| Nonce charset | `A-Za-z0-9`, `-`, `_` |
-| Nonce max length | 128 bytes |
-| `detail` max length | 256 bytes, control characters stripped |
-| Request TTL | 10 minutes, also returned as `expires_in_seconds` |
+## Calling this service
+
+```go
+c, err := api.NewClient(url, api.WithClient(api.NewHTTPClient(api.HTTPOptions{})))
+```
+
+The zero value is the intended default: a 5s timeout, one retry, no
+breaker. One retry rather than five, because five can mean five times the
+traffic to a dependency that is already struggling. Pass
+`api.ExponentialRetry{}` or `api.NoRetry{}`, and a `Breaker`, when a
+specific call wants something else.
+
+## Deploying
+
+Push to main. CI builds the image; argocd-image-updater sees the new digest
+and commits it to the homelab repo; ArgoCD syncs it. No homelab credential
+lives in this repo.
+
+`deploy/` is rendered from `config.yaml`. Adjust it with `patches` there,
+keyed by resource kind, rather than editing the manifests — a patch merges
+into what the tool generates, so later convention changes still reach this
+service.

@@ -1,13 +1,14 @@
-# The template's Dockerfile copies into /root/ and runs as root. This
-# service runs with runAsNonRoot/runAsUser 65532 and a read-only root
-# filesystem, so the binary has to live somewhere that user can execute.
-FROM alpine:latest
+# Distroless rather than alpine: the binary is static (CGO_ENABLED=0), so a
+# shell and package manager would add attack surface and nothing else. The
+# :nonroot variant already runs as uid 65532 - the uid the generated
+# securityContext expects - so there is no adduser step to drift out of
+# sync, and ca-certificates are included for outbound HTTPS.
+#
+# bin/app is built by CI before this runs; `docker build` alone will not
+# produce a working image. Run `make build` first.
+FROM gcr.io/distroless/static-debian12:nonroot
 
-RUN addgroup -g 65532 -S nonroot && adduser -u 65532 -S nonroot -G nonroot
-
-WORKDIR /app
-COPY bin/app /app/app
-RUN chmod 0555 /app/app
+COPY --chown=65532:65532 bin/app /app/app
 
 USER 65532:65532
 EXPOSE 3000
