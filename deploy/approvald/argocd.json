@@ -4,5 +4,5 @@
   "namespace": "approvald",
   "image": "ghcr.io/christopherscot/approvald",
   "repoURL": "https://github.com/ChristopherScot/approvald",
-  "path": "deploy/approvald"
+  "manifestPath": "deploy/approvald"
 }
