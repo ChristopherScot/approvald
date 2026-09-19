@@ -22,7 +22,7 @@ import createFetchClient from 'openapi-fetch'
  *  version a consumer actually installed, so deriving it means the header
  *  cannot disagree with what they have. package.json in turn tracks the
  *  spec's info.version. */
-import pkg from '../../package.json' with { type: 'json' }
+import pkg from './package.json' with { type: 'json' }
 
 export const ClientVersion = pkg.version
 export const ClientVersionHeader = 'X-Client-Version'

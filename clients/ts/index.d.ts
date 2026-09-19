@@ -1,6 +1,16 @@
 import type { Client } from 'openapi-fetch'
 import type { paths } from './schema.js'
 
+// The generated schema, re-exported so consumers can name the types the
+// API is made of: `components['schemas']['Thing']` for a response body,
+// `paths` for a route.
+//
+// Without this they are in the package but unreachable - a consumer has
+// to restate every shape it handles, which is the thing generating a
+// client was supposed to prevent, and the restatement drifts silently
+// when the spec moves.
+export type { paths, components, operations } from './schema.js'
+
 /** The installed package version, which tracks the spec. */
 export declare const ClientVersion: string
 export declare const ClientVersionHeader: string
