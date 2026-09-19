@@ -25,7 +25,15 @@ import createFetchClient from 'openapi-fetch'
 import pkg from './package.json' with { type: 'json' }
 
 export const ClientVersion = pkg.version
-export const ClientVersionHeader = 'X-Client-Version'
+export const ClientVersionHeader = 'Client-Version'
+
+// Client-Name carries WHICH service is calling, where Client-Version
+// says which version of the spec it was built against. Set it via
+// createClient({ name: 'my-service' }).
+//
+// No X- prefix on either: RFC 6648 deprecated it in 2012. Renamed while
+// nothing read the header, which is the only cheap moment to do it.
+export const ClientNameHeader = 'Client-Name'
 
 /** Repeat only what is safe to repeat: a POST may already have applied,
  *  so retrying it can create a second thing. */
@@ -139,6 +147,10 @@ export class Breaker {
  */
 export default function createClient({
   baseUrl,
+  // The CALLER's own service name, sent as Client-Name so the server
+  // can log who asked. Omitted means the server records "unknown",
+  // which is honest rather than guessed.
+  name,
   timeoutMs = 5000,
   policy = singleRetry,
   breaker,
@@ -148,6 +160,7 @@ export default function createClient({
   const resilientFetch = async (input, init) => {
     const req = new Request(input, init)
     req.headers.set(ClientVersionHeader, ClientVersion)
+    if (name) req.headers.set(ClientNameHeader, name)
 
     if (breaker && !breaker.allow()) throw new CircuitOpenError()
 

@@ -34,13 +34,34 @@ import (
 // permissive: one retry rather than five, because five can mean five
 // times the traffic to something already struggling.
 
-// ClientVersion is sent on every request as X-Client-Version, so a
+// ClientVersion is sent on every request as Client-Version, so a
 // server can see which client versions are still calling it before
 // changing something they depend on. It tracks the spec's info.version.
 const ClientVersion = "0.1.0"
 
 // ClientVersionHeader names the header carrying ClientVersion.
-const ClientVersionHeader = "X-Client-Version"
+//
+// No X- prefix: RFC 6648 deprecated it in 2012, because a header that
+// becomes a standard cannot shed the prefix without breaking every
+// client that sent it. Renamed while nothing read it - the header had
+// been write-only since it was added, so this cost nothing, and it
+// would have cost a coordinated rollout later.
+const ClientVersionHeader = "Client-Version"
+
+// ClientNameHeader carries HTTPOptions.Name: WHICH service is calling,
+// where Client-Version says which version of the spec it was built
+// against.
+//
+// Without it every request a server logs looks the same whoever sent
+// it, so "something is polling a dead battle once a second" cannot be
+// attributed without inference. Version alone does not separate two
+// callers built from the same spec.
+//
+// A plain header rather than W3C Baggage: Baggage earns its complexity
+// by surviving multi-hop propagation into spans, and these are
+// single-hop calls into a stack that collects logs and metrics and no
+// traces. Revisit if a tracing backend ever lands.
+const ClientNameHeader = "Client-Name"
 
 // RetryPolicy decides whether a failed request is worth repeating, and
 // how long to wait. The length of Backoffs is the retry count.
@@ -156,6 +177,14 @@ type HTTPOptions struct {
 	// client. Zero means 30s. A server may answer with an hour, and
 	// sleeping that long inside a request looks exactly like a hang.
 	MaxRetryAfter time.Duration
+
+	// Name identifies the SERVICE making the call, sent as Client-Name.
+	//
+	// The caller's own name - "pokedex-web", not the service it is
+	// calling. Empty sends nothing and the server records the caller as
+	// unknown, which is honest; guessing from the user agent would put
+	// a confident wrong answer in the logs.
+	Name string
 }
 
 // HTTPClient satisfies ogen's ht.Client.
@@ -164,6 +193,7 @@ type HTTPClient struct {
 	policy        RetryPolicy
 	breaker       *Breaker
 	maxRetryAfter time.Duration
+	name          string
 }
 
 var _ ht.Client = (*HTTPClient)(nil)
@@ -184,6 +214,7 @@ func NewHTTPClient(o HTTPOptions) *HTTPClient {
 		policy:        o.Policy,
 		breaker:       o.Breaker,
 		maxRetryAfter: o.MaxRetryAfter,
+		name:          o.Name,
 	}
 }
 
@@ -230,6 +261,9 @@ func (c *HTTPClient) Do(req *http.Request) (*http.Response, error) {
 		return nil, ErrCircuitOpen
 	}
 	req.Header.Set(ClientVersionHeader, ClientVersion)
+	if c.name != "" {
+		req.Header.Set(ClientNameHeader, c.name)
+	}
 
 	backoffs := c.policy.Backoffs()
 	var (

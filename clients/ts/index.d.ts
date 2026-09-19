@@ -14,6 +14,7 @@ export type { paths, components, operations } from './schema.js'
 /** The installed package version, which tracks the spec. */
 export declare const ClientVersion: string
 export declare const ClientVersionHeader: string
+export declare const ClientNameHeader: string
 
 export interface RetryPolicy {
   backoffs(): number[]
