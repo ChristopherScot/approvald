@@ -55,7 +55,7 @@ jobs:
       # One binary for both checks below. Downloaded rather than built so
       # CI does not depend on this repo being able to compile it.
       - name: Install homelabctl
-        run: curl -fsSL https://github.com/ChristopherScot/ci-scripts/releases/latest/download/homelabctl_linux_amd64.tar.gz | tar -xz
+        run: curl -fsSL https://github.com/ChristopherScot/homelabctl/releases/latest/download/homelabctl_linux_amd64.tar.gz | tar -xz
 
       # openapi.yml is the source of truth, so everything derived from it
       # - the server interface, both clients, the versions they report -
