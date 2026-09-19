@@ -1,0 +1,19 @@
+{
+  "name": "@christopherscot/approvald-client",
+  "version": "0.1.0",
+  "description": "Typed client for the approvald API, generated from its OpenAPI spec.",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChristopherScot/approvald.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.17.0"
+  }
+}

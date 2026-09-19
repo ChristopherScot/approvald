@@ -1,0 +1,78 @@
+# Publishes generated TypeScript clients to npm.
+#
+# ALWAYS this filename, in every repo homelabctl scaffolds, and always at
+# the repository root. That is the whole point of it being its own
+# workflow: npm trusted publishing is configured per package, in a
+# browser, and the workflow FILENAME is one of the fields that cannot be
+# changed afterwards. A per-service name would mean looking up a
+# different filename for every package; one fixed name means the setup is
+# the same three values every time - owner, repo, publish.yaml.
+#
+# It finds clients rather than naming them, which is what makes one file
+# cover both layouts: a monorepo has services/<name>/clients/ts for each
+# spec-first service, and a single-service repo has clients/ts at the
+# root. Listing paths instead would go stale the first time someone adds
+# a service and does not think about this file.
+name: publish
+
+on:
+  # The service workflow tags v<spec-version> when info.version changes,
+  # so this runs exactly when a client is ready and never on an ordinary
+  # commit.
+  push:
+    tags: ['v*']
+  # For recovering a publish that failed for a reason outside this repo:
+  # an npm outage, or a trusted publisher that was not configured yet.
+  workflow_dispatch:
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets this job request an OIDC token, which is how npm trusted
+      # publishing authenticates. It grants no write access to anything.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 24 for npm >= 11.5.1, which trusted publishing requires.
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish every client whose version is not on npm yet
+        run: |
+          set -euo pipefail
+
+          found=0
+          published=0
+          # Both layouts: clients/ts at the repo root for a single
+          # service, services/*/clients/ts in a monorepo.
+          while IFS= read -r pkg; do
+            found=$((found + 1))
+            dir=$(dirname "$pkg")
+            name=$(node -p "require('./$pkg').name")
+            version=$(node -p "require('./$pkg').version")
+
+            # Already published at this version is nothing to do, not a
+            # failure: a tag runs this for every client in the repo and
+            # only the one whose spec moved is new.
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already on npm"
+              continue
+            fi
+
+            echo "publishing $name@$version"
+            # --provenance records where the package was built, which
+            # OIDC already proves, so it costs nothing.
+            ( cd "$dir" && npm publish --provenance )
+            published=$((published + 1))
+          done < <(find . -path '*/clients/ts/package.json' -not -path './node_modules/*' | sort)
+
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no generated clients found - expected clients/ts/package.json"
+            exit 1
+          fi
+          echo "$published of $found client(s) published"

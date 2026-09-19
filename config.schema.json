@@ -14,7 +14,7 @@
     "runtime": {
       "type": "string",
       "description": "Which language/shape plugin builds this. See homelabctl init --help.",
-      "examples": ["go-service", "node-service", "go-cli"]
+      "examples": ["go-service", "node-service", "go-cli", "go-tui"]
     },
     "module": {
       "type": "string",
@@ -59,7 +59,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "repository": { "type": "string", "description": "Registry path without a tag." }
+        "repository": { "type": "string", "description": "Registry path without a tag, lowercase. Any registry works; ghcr.io is the default because the generated workflow authenticates to it with GITHUB_TOKEN. Another registry means editing that workflow's login step." }
       }
     },
     "env": {
@@ -118,7 +118,8 @@
           }
         },
         "public": { "type": "boolean", "description": "Route via the internet-facing controller instead of the LAN one." },
-        "authelia": { "type": "boolean", "description": "Put Authelia forward-auth in front. LAN-only; cannot be combined with public." }
+        "authelia": { "type": "boolean", "description": "Put Authelia forward-auth in front. LAN-only; cannot be combined with public." },
+        "path": { "type": "string", "pattern": "^/", "description": "URL prefix this service answers on, default /. Lets several services share one hostname; the prefix is stripped before the request reaches the service." }
       }
     },
     "probes": {
@@ -145,6 +146,12 @@
       "type": "object",
       "additionalProperties": { "type": "string" },
       "description": "Replace a generated file wholesale. This opts the service OUT of future convention changes for that file - prefer patches. {{ .ImageURL }} is substituted."
+    },
+    "manifests": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Hand-written Kubernetes manifests this service owns, relative to the service directory, copied into the render output and listed in kustomization.yaml. For shapes this tool does not generate: a CNPG Cluster, a PVC, a NetworkPolicy. Argo applies them with prune enabled, so annotate anything holding data with argocd.argoproj.io/sync-options: Prune=false.",
+      "examples": [["db.yaml"]]
     }
   }
 }
