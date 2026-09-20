@@ -64,8 +64,34 @@
     },
     "env": {
       "type": "object",
-      "additionalProperties": { "type": "string" },
-      "description": "Plain environment variables. Secrets belong under 'secrets'."
+      "description": "Environment variables. A literal value, or a reference to a key in a Kubernetes Secret another tool created - an operator-minted database credential, say. Secrets kept in Vault belong under 'secrets' instead. Bulk injection of a whole secret is deliberately not offered: it would deliver the operator's key names rather than the ones this service reads, and this tool could not know what they are.",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "required": ["secretKeyRef"],
+            "additionalProperties": false,
+            "properties": {
+              "secretKeyRef": {
+                "type": "object",
+                "required": ["name", "key"],
+                "additionalProperties": false,
+                "description": "One key in one Kubernetes Secret, the same shape as the Kubernetes field of this name.",
+                "properties": {
+                  "name": { "type": "string", "description": "The Secret's name, in this namespace." },
+                  "key": { "type": "string", "description": "Which key of it to read. CNPG writes a connection string under 'uri'." }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "minVersion": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Oldest client version this service still answers. A client reporting a Client-Version below this gets 410 Gone. Written with the leading v, as v0.3.0. Hand-set and expected to trail real releases by a long way - it means 'older than this is actively harmful', not 'the current version'. Defaults to v0.0.1, which every real version clears, so the check is inert until raised."
     },
     "secrets": {
       "type": "object",

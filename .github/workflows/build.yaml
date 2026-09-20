@@ -37,8 +37,12 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      # make test, not the commands themselves: the Makefile says it
+      # runs "what CI runs", and that is only true if this IS it. Two
+      # copies of the same command drift, and the one that drifts is
+      # whichever nobody is looking at.
       - name: Test
-        run: go test -race ./...
+        run: make test
 
       # CGO_ENABLED=0: a cgo binary links against glibc and will not run on
       # alpine, and that only shows up at container start.
